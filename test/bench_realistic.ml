@@ -43,6 +43,16 @@ let load_all_cached () =
     Marshal_cache.with_unmarshalled_file path (fun (_ : int list) -> ())
   ) files
 
+(* Load all files using reactive API - only unmarshal changed files *)
+let result_cache : (string, int) Hashtbl.t = Hashtbl.create n_files
+
+let load_all_reactive () =
+  Array.iter (fun path ->
+    match Marshal_cache.with_unmarshalled_if_changed path (fun (data : int list) -> List.length data) with
+    | Some result -> Hashtbl.replace result_cache path result
+    | None -> ()  (* unchanged, keep cached result *)
+  ) files
+
 (* Modify a random subset of files *)
 let modify_files indices =
   List.iter (fun i ->
@@ -95,8 +105,15 @@ let () =
   (* Measure stat() overhead *)
   let t_stat = time_it "stat() only (1000 files)" stat_all_files in
 
+  (* Benchmark 2b: Reactive (if_changed) on warm cache - no changes *)
+  Printf.printf "\nBenchmark 2b: Load all %d files (reactive, no changes)\n%!" n_files;
+  (* Prime reactive cache *)
+  load_all_reactive ();
+  let t_reactive = time_it "with_unmarshalled_if_changed" load_all_reactive in
+
   Printf.printf "\n  Cold speedup: %.2fx\n%!" (t_channel_cold /. t_cache_cold);
   Printf.printf "  Warm speedup: %.2fx\n%!" (t_channel_cold /. t_cache_warm);
+  Printf.printf "  Reactive speedup (no changes): %.2fx\n%!" (t_channel_cold /. t_reactive);
   Printf.printf "  stat() overhead: %.1f%% of warm cache time\n%!" (t_stat /. t_cache_warm *. 100.0);
 
   (* Benchmark 3: Incremental updates *)
@@ -112,6 +129,11 @@ let () =
 
   let total_channel = ref 0.0 in
   let total_cache = ref 0.0 in
+  let total_reactive = ref 0.0 in
+
+  (* Prime the reactive cache *)
+  Hashtbl.clear result_cache;
+  load_all_reactive ();
 
   for iter = 1 to n_iterations do
     (* Modify some files *)
@@ -124,26 +146,37 @@ let () =
     let t_channel = Unix.gettimeofday () -. t1 in
     total_channel := !total_channel +. t_channel;
 
-    (* Time loading all files with cache (detects changes automatically) *)
+    (* Time loading all files with cache (always unmarshals) *)
     let t2 = Unix.gettimeofday () in
     load_all_cached ();
     let t_cache = Unix.gettimeofday () -. t2 in
     total_cache := !total_cache +. t_cache;
 
+    (* Time loading with reactive API (only unmarshal changed files) *)
+    let t3 = Unix.gettimeofday () in
+    load_all_reactive ();
+    let t_reactive = Unix.gettimeofday () -. t3 in
+    total_reactive := !total_reactive +. t_reactive;
+
     if iter mod 20 = 0 then
-      Printf.printf "  Iteration %d/%d: channel=%.1fms, cache=%.1fms, speedup=%.1fx\n%!"
-        iter n_iterations (t_channel *. 1000.0) (t_cache *. 1000.0) (t_channel /. t_cache)
+      Printf.printf "  Iteration %d/%d: channel=%.1fms, cache=%.1fms, reactive=%.1fms\n%!"
+        iter n_iterations (t_channel *. 1000.0) (t_cache *. 1000.0) (t_reactive *. 1000.0)
   done;
 
   Printf.printf "\n  --- Summary ---\n%!";
-  Printf.printf "  Total time (Marshal.from_channel): %.1f ms\n%!" (!total_channel *. 1000.0);
-  Printf.printf "  Total time (Marshal_cache):        %.1f ms\n%!" (!total_cache *. 1000.0);
-  Printf.printf "  Overall speedup: %.1fx\n%!" (!total_channel /. !total_cache);
-  Printf.printf "  Average per iteration:\n%!";
-  Printf.printf "    Marshal.from_channel: %.1f ms\n%!"
+  Printf.printf "  Total time (Marshal.from_channel):       %.1f ms\n%!" (!total_channel *. 1000.0);
+  Printf.printf "  Total time (with_unmarshalled_file):     %.1f ms\n%!" (!total_cache *. 1000.0);
+  Printf.printf "  Total time (with_unmarshalled_if_changed): %.1f ms\n%!" (!total_reactive *. 1000.0);
+  Printf.printf "\n  Speedup vs Marshal.from_channel:\n%!";
+  Printf.printf "    with_unmarshalled_file:      %.1fx\n%!" (!total_channel /. !total_cache);
+  Printf.printf "    with_unmarshalled_if_changed: %.1fx\n%!" (!total_channel /. !total_reactive);
+  Printf.printf "\n  Average per iteration:\n%!";
+  Printf.printf "    Marshal.from_channel:          %.1f ms\n%!"
     (!total_channel *. 1000.0 /. float n_iterations);
-  Printf.printf "    Marshal_cache:        %.1f ms\n%!"
+  Printf.printf "    with_unmarshalled_file:        %.1f ms\n%!"
     (!total_cache *. 1000.0 /. float n_iterations);
+  Printf.printf "    with_unmarshalled_if_changed:  %.1f ms\n%!"
+    (!total_reactive *. 1000.0 /. float n_iterations);
 
   cleanup ();
   Printf.printf "\n=== Benchmark Complete ===\n%!"

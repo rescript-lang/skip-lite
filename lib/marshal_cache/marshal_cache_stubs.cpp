@@ -146,9 +146,9 @@ public:
     return inst;
   }
 
-  // Acquire a mapping, incrementing in_use. Returns pointer and length.
+  // Acquire a mapping, incrementing in_use. Returns pointer, length, and whether file changed.
   // Throws std::runtime_error on failure.
-  void acquire_mapping(const std::string& path, void** out_ptr, size_t* out_len);
+  void acquire_mapping(const std::string& path, void** out_ptr, size_t* out_len, bool* out_changed);
 
   // Release a mapping, decrementing in_use and cleaning up old mappings.
   void release_mapping(const std::string& path);
@@ -295,7 +295,7 @@ void MarshalCache::evict_if_needed() {
 }
 
 void MarshalCache::acquire_mapping(const std::string& path,
-                                   void** out_ptr, size_t* out_len) {
+                                   void** out_ptr, size_t* out_len, bool* out_changed) {
   std::unique_lock<std::mutex> lock(mutex_);
 
   // Get current file identity
@@ -356,6 +356,7 @@ void MarshalCache::acquire_mapping(const std::string& path,
 
   *out_ptr = entry.current.ptr;
   *out_len = entry.current.len;
+  *out_changed = needs_remap;
 
   // Mutex released here (RAII)
 }
@@ -498,10 +499,11 @@ CAMLprim value mfc_with_unmarshalled_file(value path_val, value closure_val) {
 
   void* ptr = nullptr;
   size_t len = 0;
+  bool changed = false;
 
   // Acquire mapping (may throw)
   try {
-    MarshalCache::instance().acquire_mapping(path_str, &ptr, &len);
+    MarshalCache::instance().acquire_mapping(path_str, &ptr, &len, &changed);
   } catch (const std::exception& e) {
     // Use path_str.c_str() instead of path, because raise_cache_error
     // allocates and can trigger GC which would invalidate the pointer
@@ -526,6 +528,55 @@ CAMLprim value mfc_with_unmarshalled_file(value path_val, value closure_val) {
   }
 
   CAMLreturn(result);
+}
+
+// Reactive entry point: only unmarshal if file changed
+// Returns Some(f(data)) if changed, None if unchanged
+CAMLprim value mfc_with_unmarshalled_if_changed(value path_val, value closure_val) {
+  CAMLparam2(path_val, closure_val);
+  CAMLlocal3(unmarshalled, result, some_result);
+
+  const char* path = String_val(path_val);
+  std::string path_str(path);
+
+  void* ptr = nullptr;
+  size_t len = 0;
+  bool changed = false;
+
+  // Acquire mapping (may throw)
+  try {
+    MarshalCache::instance().acquire_mapping(path_str, &ptr, &len, &changed);
+  } catch (const std::exception& e) {
+    raise_cache_error(path_str.c_str(), e.what());
+    CAMLreturn(Val_unit);  // Not reached
+  }
+
+  if (!changed) {
+    // File unchanged - release and return None
+    MarshalCache::instance().release_mapping(path_str);
+    CAMLreturn(Val_none);
+  }
+
+  // File changed - unmarshal and call callback
+  unmarshalled = unmarshal_from_ptr(ptr, len);
+
+  // Call the OCaml callback
+  result = caml_callback_exn(closure_val, unmarshalled);
+
+  // Release mapping before potentially re-raising
+  MarshalCache::instance().release_mapping(path_str);
+
+  // Check if callback raised an exception
+  if (Is_exception_result(result)) {
+    value exn = Extract_exception(result);
+    caml_raise(exn);
+  }
+
+  // Wrap in Some
+  some_result = caml_alloc(1, 0);
+  Store_field(some_result, 0, result);
+
+  CAMLreturn(some_result);
 }
 
 // Clear all cache entries

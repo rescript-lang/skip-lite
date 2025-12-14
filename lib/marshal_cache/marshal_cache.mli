@@ -66,6 +66,30 @@ type stats = {
 val with_unmarshalled_file : string -> ('a -> 'r) -> 'r
   [@@alert unsafe "Caller must ensure the file contains data of the expected type"]
 
+(** [with_unmarshalled_if_changed path f] is like {!with_unmarshalled_file} but
+    only unmarshals if the file changed since the last access.
+
+    Returns [Some (f data)] if the file changed (or is accessed for the first time).
+    Returns [None] if the file has not changed since last access (no unmarshal occurs).
+
+    This is the key primitive for building reactive/incremental systems:
+    {[
+      let my_cache = Hashtbl.create 100
+
+      let get_result path =
+        match Marshal_cache.with_unmarshalled_if_changed path process with
+        | Some result ->
+            Hashtbl.replace my_cache path result;
+            result
+        | None ->
+            Hashtbl.find my_cache path  (* use cached result *)
+    ]}
+
+    @raise Cache_error if the file cannot be read, mapped, or unmarshalled.
+    @raise exn if [f] raises; the cache state remains consistent. *)
+val with_unmarshalled_if_changed : string -> ('a -> 'r) -> 'r option
+  [@@alert unsafe "Caller must ensure the file contains data of the expected type"]
+
 (** Remove all entries from the cache, unmapping all memory.
     Entries currently in use (during a callback) are preserved and will be
     cleaned up when their callbacks complete. *)

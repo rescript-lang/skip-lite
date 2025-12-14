@@ -345,6 +345,70 @@ let test_concurrent_domains () =
     )
   )
 
+(* Test: with_unmarshalled_if_changed returns Some on first access *)
+let test_if_changed_first_access () =
+  test "if_changed first access" (fun () ->
+    Marshal_cache.clear ();
+    setup ();
+    let result = Marshal_cache.with_unmarshalled_if_changed test_file
+      (fun (data : int list) -> List.length data)
+    in
+    assert (result = Some 5)
+  )
+
+(* Test: with_unmarshalled_if_changed returns None on unchanged file *)
+let test_if_changed_unchanged () =
+  test "if_changed unchanged" (fun () ->
+    Marshal_cache.clear ();
+    setup ();
+    (* First access - should return Some *)
+    let r1 = Marshal_cache.with_unmarshalled_if_changed test_file
+      (fun (data : int list) -> List.length data)
+    in
+    assert (r1 = Some 5);
+    (* Second access - should return None (unchanged) *)
+    let r2 = Marshal_cache.with_unmarshalled_if_changed test_file
+      (fun (_ : int list) -> failwith "should not be called")
+    in
+    assert (r2 = None)
+  )
+
+(* Test: with_unmarshalled_if_changed returns Some after file modification *)
+let test_if_changed_after_modification () =
+  test "if_changed after modification" (fun () ->
+    Marshal_cache.clear ();
+    setup ();
+    (* First access *)
+    let _ = Marshal_cache.with_unmarshalled_if_changed test_file
+      (fun (_ : int list) -> ())
+    in
+    (* Modify the file *)
+    Unix.sleepf 0.01;
+    let new_data = [10; 20; 30] in
+    let oc = open_out_bin test_file in
+    Marshal.to_channel oc new_data [];
+    close_out oc;
+    (* Next access - should return Some (file changed) *)
+    let result = Marshal_cache.with_unmarshalled_if_changed test_file
+      (fun (data : int list) -> data)
+    in
+    assert (result = Some [10; 20; 30])
+  )
+
+(* Test: with_unmarshalled_if_changed works with regular with_unmarshalled_file *)
+let test_if_changed_interop () =
+  test "if_changed interop" (fun () ->
+    Marshal_cache.clear ();
+    setup ();
+    (* Access with regular function first *)
+    Marshal_cache.with_unmarshalled_file test_file (fun (_ : int list) -> ());
+    (* if_changed should return None (already accessed) *)
+    let result = Marshal_cache.with_unmarshalled_if_changed test_file
+      (fun (_ : int list) -> failwith "should not be called")
+    in
+    assert (result = None)
+  )
+
 let () =
   Printf.printf "=== Marshal_cache Tests ===\n%!";
   setup ();
@@ -367,6 +431,10 @@ let () =
     test_empty_file ();
     test_no_fd_leak ();
     test_concurrent_domains ();
+    test_if_changed_first_access ();
+    test_if_changed_unchanged ();
+    test_if_changed_after_modification ();
+    test_if_changed_interop ();
   with e ->
     Printf.printf "Unexpected error: %s\n%!" (Printexc.to_string e)
   );
