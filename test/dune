@@ -3,3 +3,8 @@
  (libraries marshal_cache unix)
  (flags (:standard -alert -unsafe)))
 
+(executable
+ (name bench_marshal_cache)
+ (libraries marshal_cache unix)
+ (flags (:standard -alert -unsafe)))
+

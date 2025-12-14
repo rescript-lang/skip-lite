@@ -284,6 +284,67 @@ let test_empty_file () =
     Unix.unlink empty_file
   )
 
+(* Test: No file descriptor leaks after many operations *)
+let test_no_fd_leak () =
+  test "no fd leak" (fun () ->
+    Marshal_cache.clear ();
+    setup ();
+    (* Get initial fd count (on macOS/Linux, count entries in /dev/fd or /proc/self/fd) *)
+    let count_fds () =
+      try
+        let dir = if Sys.file_exists "/proc/self/fd" then "/proc/self/fd" else "/dev/fd" in
+        Array.length (Sys.readdir dir)
+      with _ -> -1  (* Skip test if we can't count fds *)
+    in
+    let initial_fds = count_fds () in
+    if initial_fds < 0 then () else begin
+      (* Do many cache operations *)
+      for _ = 1 to 100 do
+        Marshal_cache.with_unmarshalled_file test_file (fun (_ : int list) -> ());
+        Marshal_cache.clear ()
+      done;
+      let final_fds = count_fds () in
+      (* Allow some slack (±5) for other system activity *)
+      assert (abs (final_fds - initial_fds) < 5)
+    end
+  )
+
+(* Test: Concurrent access from multiple domains *)
+let test_concurrent_domains () =
+  test "concurrent domains" (fun () ->
+    Marshal_cache.clear ();
+    setup ();
+    let n_domains = 4 in
+    let iterations = 100 in
+    let errors = Atomic.make 0 in
+
+    let worker () =
+      for _ = 1 to iterations do
+        try
+          Marshal_cache.with_unmarshalled_file test_file (fun (data : int list) ->
+            (* Do some work *)
+            ignore (List.length data)
+          )
+        with _ ->
+          Atomic.incr errors
+      done
+    in
+
+    (* Spawn domains *)
+    let domains = List.init n_domains (fun _ -> Domain.spawn worker) in
+
+    (* Wait for all to complete *)
+    List.iter Domain.join domains;
+
+    (* Check no errors *)
+    assert (Atomic.get errors = 0);
+
+    (* Cache should still be usable *)
+    Marshal_cache.with_unmarshalled_file test_file (fun (data : int list) ->
+      assert (List.length data > 0)
+    )
+  )
+
 let () =
   Printf.printf "=== Marshal_cache Tests ===\n%!";
   setup ();
@@ -304,6 +365,8 @@ let () =
     test_invalid_max_entries ();
     test_invalid_max_bytes ();
     test_empty_file ();
+    test_no_fd_leak ();
+    test_concurrent_domains ();
   with e ->
     Printf.printf "Unexpected error: %s\n%!" (Printexc.to_string e)
   );
