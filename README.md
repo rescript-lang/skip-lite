@@ -1,6 +1,6 @@
 # skip-lite
 
-Portable OCaml runtime utilities from [skip-ocaml](https://github.com/rescript-lang/skip-ocaml) — works with stock toolchains on macOS and Linux.
+Portable OCaml runtime utilities from [skip-ocaml](https://github.com/SkipLabs/skip-ocaml) — works with stock toolchains on macOS and Linux.
 
 ## Overview
 
