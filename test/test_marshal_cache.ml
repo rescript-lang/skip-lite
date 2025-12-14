@@ -345,6 +345,219 @@ let test_concurrent_domains () =
     )
   )
 
+(* Test: Concurrent access to different files from different domains *)
+let test_concurrent_different_files () =
+  test "concurrent different files" (fun () ->
+    Marshal_cache.clear ();
+    let n_domains = 4 in
+    let files_per_domain = 10 in
+    let iterations = 20 in
+
+    (* Create files for each domain *)
+    let all_files = Array.init (n_domains * files_per_domain) (fun i ->
+      let path = Filename.concat test_dir (Printf.sprintf "concurrent_%d.marshal" i) in
+      let oc = open_out_bin path in
+      Marshal.to_channel oc (List.init 100 (fun j -> i * 1000 + j)) [];
+      close_out oc;
+      path
+    ) in
+
+    let errors = Atomic.make 0 in
+    let ops = Atomic.make 0 in
+
+    let worker domain_id =
+      let start_idx = domain_id * files_per_domain in
+      for _ = 1 to iterations do
+        for f = 0 to files_per_domain - 1 do
+          let path = all_files.(start_idx + f) in
+          try
+            Marshal_cache.with_unmarshalled_file path (fun (data : int list) ->
+              ignore (List.length data);
+              Atomic.incr ops
+            )
+          with _ ->
+            Atomic.incr errors
+        done
+      done
+    in
+
+    let domains = List.init n_domains (fun i -> Domain.spawn (fun () -> worker i)) in
+    List.iter Domain.join domains;
+
+    assert (Atomic.get errors = 0);
+    assert (Atomic.get ops = n_domains * files_per_domain * iterations);
+
+    (* Cleanup *)
+    Array.iter (fun path -> try Unix.unlink path with _ -> ()) all_files
+  )
+
+(* Test: Concurrent modifications while other domains are reading.
+   This tests that the system doesn't crash or corrupt memory during 
+   concurrent file modifications. Some transient errors are expected
+   (e.g., reading a partially written file). *)
+let test_concurrent_modifications () =
+  test "concurrent modifications" (fun () ->
+    Marshal_cache.clear ();
+    let n_readers = 3 in
+    let n_iterations = 50 in
+
+    (* Create initial file *)
+    let path = Filename.concat test_dir "concurrent_modify.marshal" in
+    let write_file value =
+      let oc = open_out_bin path in
+      Marshal.to_channel oc (value : int) [];
+      close_out oc
+    in
+    write_file 0;
+
+    let transient_errors = Atomic.make 0 in
+    let reads = Atomic.make 0 in
+    let stop = Atomic.make false in
+
+    (* Reader worker: continuously read the file *)
+    let reader () =
+      while not (Atomic.get stop) do
+        try
+          Marshal_cache.with_unmarshalled_file path (fun (v : int) ->
+            (* Value should be a valid int *)
+            ignore v;
+            Atomic.incr reads
+          )
+        with
+        | Failure _ | Marshal_cache.Cache_error _ ->
+          (* Transient errors during concurrent modification are expected *)
+          Atomic.incr transient_errors
+      done
+    in
+
+    (* Writer: modify the file periodically *)
+    let writer () =
+      for i = 1 to n_iterations do
+        write_file i;
+        (* Small delay to let readers catch some changes *)
+        Unix.sleepf 0.001
+      done;
+      Atomic.set stop true
+    in
+
+    (* Start readers first *)
+    let reader_domains = List.init n_readers (fun _ -> Domain.spawn reader) in
+    (* Then start writer *)
+    let writer_domain = Domain.spawn writer in
+
+    Domain.join writer_domain;
+    List.iter Domain.join reader_domains;
+
+    (* Success = no crashes, some reads completed *)
+    (* Transient errors during modification are acceptable *)
+    assert (Atomic.get reads > 0);
+
+    (* Verify cache is still usable after all the chaos *)
+    Marshal_cache.clear ();
+    write_file 999;
+    Marshal_cache.with_unmarshalled_file path (fun (v : int) ->
+      assert (v = 999)
+    );
+
+    Unix.unlink path
+  )
+
+(* Test: LRU eviction under heavy contention *)
+let test_concurrent_eviction () =
+  test "concurrent eviction" (fun () ->
+    Marshal_cache.clear ();
+    (* Set small cache to force eviction *)
+    Marshal_cache.set_max_entries 10;
+
+    let n_domains = 4 in
+    let n_files = 50 in (* More files than cache size *)
+    let iterations = 20 in
+
+    (* Create files *)
+    let files = Array.init n_files (fun i ->
+      let path = Filename.concat test_dir (Printf.sprintf "evict_%d.marshal" i) in
+      let oc = open_out_bin path in
+      Marshal.to_channel oc (List.init 10 (fun j -> i * 100 + j)) [];
+      close_out oc;
+      path
+    ) in
+
+    let errors = Atomic.make 0 in
+
+    let worker () =
+      for _ = 1 to iterations do
+        (* Access random files to trigger eviction *)
+        let idx = Random.int n_files in
+        try
+          Marshal_cache.with_unmarshalled_file files.(idx) (fun (data : int list) ->
+            ignore (List.length data)
+          )
+        with _ ->
+          Atomic.incr errors
+      done
+    in
+
+    let domains = List.init n_domains (fun _ -> Domain.spawn worker) in
+    List.iter Domain.join domains;
+
+    assert (Atomic.get errors = 0);
+
+    (* Verify cache stats are consistent *)
+    let stats = Marshal_cache.stats () in
+    assert (stats.entry_count <= 10);
+
+    (* Reset and cleanup *)
+    Marshal_cache.set_max_entries 10000;
+    Marshal_cache.clear ();
+    Array.iter (fun path -> try Unix.unlink path with _ -> ()) files
+  )
+
+(* Test: Race between invalidate and with_unmarshalled_file *)
+let test_concurrent_invalidate () =
+  test "concurrent invalidate" (fun () ->
+    Marshal_cache.clear ();
+    let n_readers = 3 in
+    let n_iterations = 100 in
+
+    (* Create file *)
+    let path = Filename.concat test_dir "concurrent_invalidate.marshal" in
+    let oc = open_out_bin path in
+    Marshal.to_channel oc ([1; 2; 3; 4; 5] : int list) [];
+    close_out oc;
+
+    let errors = Atomic.make 0 in
+    let stop = Atomic.make false in
+
+    (* Reader: continuously read *)
+    let reader () =
+      while not (Atomic.get stop) do
+        try
+          Marshal_cache.with_unmarshalled_file path (fun (data : int list) ->
+            ignore (List.length data)
+          )
+        with _ ->
+          Atomic.incr errors
+      done
+    in
+
+    (* Invalidator: continuously invalidate *)
+    let invalidator () =
+      for _ = 1 to n_iterations do
+        Marshal_cache.invalidate path
+      done;
+      Atomic.set stop true
+    in
+
+    let reader_domains = List.init n_readers (fun _ -> Domain.spawn reader) in
+    let invalidator_domain = Domain.spawn invalidator in
+
+    Domain.join invalidator_domain;
+    List.iter Domain.join reader_domains;
+
+    assert (Atomic.get errors = 0);
+    Unix.unlink path
+  )
+
 (* Test: with_unmarshalled_if_changed returns Some on first access *)
 let test_if_changed_first_access () =
   test "if_changed first access" (fun () ->
@@ -431,6 +644,10 @@ let () =
     test_empty_file ();
     test_no_fd_leak ();
     test_concurrent_domains ();
+    test_concurrent_different_files ();
+    test_concurrent_modifications ();
+    test_concurrent_eviction ();
+    test_concurrent_invalidate ();
     test_if_changed_first_access ();
     test_if_changed_unchanged ();
     test_if_changed_after_modification ();

@@ -112,7 +112,7 @@ Once loaded, iterating over all 10,000 processed values takes **0.1ms** (9,393x 
 
 ## Requirements
 
-- OCaml 5.0+
+- OCaml 5.0+ — the library uses multicore-safe primitives and tests use `Domain.spawn`
 - dune 3.0+
 - C++17 compiler (clang or gcc)
 
