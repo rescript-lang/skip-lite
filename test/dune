@@ -8,3 +8,8 @@
  (libraries marshal_cache unix)
  (flags (:standard -alert -unsafe)))
 
+(executable
+ (name bench_realistic)
+ (libraries marshal_cache unix)
+ (flags (:standard -alert -unsafe)))
+
