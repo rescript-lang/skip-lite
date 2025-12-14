@@ -19,3 +19,8 @@
  (libraries reactive_file_collection unix)
  (flags (:standard -alert -unsafe)))
 
+(executable
+ (name bench_collection)
+ (libraries reactive_file_collection unix)
+ (flags (:standard -alert -unsafe)))
+

@@ -63,7 +63,7 @@ Reactive_file_collection.iter (fun path value -> ...) coll
 - Delta-based API (add/remove/update) - no full rescans
 - Batch event application
 - Backed by Marshal_cache for efficient file access
-- ~1000x speedup vs reading all files on each change
+- ~950x speedup vs re-reading all files on each change
 
 ## Installation
 
@@ -80,14 +80,25 @@ Or add to your dune-project:
 
 ## Benchmark Results
 
-With 10,000 files × 20KB each (195MB total), 10 files changing:
+With 10,000 files × 20KB each (195MB total):
 
-| Approach | Time per update | Speedup |
-|----------|-----------------|---------|
-| `Marshal.from_channel` (baseline) | 692 ms | 1x |
-| `with_unmarshalled_file` (cache) | 512 ms | 1.4x |
-| `with_unmarshalled_if_changed` | 22 ms | 32x |
-| Known-changed only (file watcher) | 0.73 ms | **948x** |
+### Marshal_cache (file-level operations)
+
+| Approach | Time | Speedup |
+|----------|------|---------|
+| `Marshal.from_channel` (baseline) | 1276 ms | 1x |
+| `with_unmarshalled_file` (warm cache) | 742 ms | 1.7x |
+| `with_unmarshalled_if_changed` (scan all) | 22 ms | 58x |
+
+### Reactive_file_collection (with 10 files changing)
+
+| Operation | Time | Speedup vs baseline |
+|-----------|------|---------------------|
+| Update 10 files | 1.26 ms | - |
+| Iterate all 10k values | 0.09 ms | - |
+| **Total per iteration** | **1.34 ms** | **950x** |
+
+Once loaded, iterating over all 10,000 processed values takes **0.1ms** (9,393x faster than re-reading files).
 
 ## Platform Support
 
