@@ -1,0 +1,5 @@
+(test
+ (name test_marshal_cache)
+ (libraries marshal_cache unix)
+ (flags (:standard -alert -unsafe)))
+
