@@ -72,6 +72,10 @@ let time_it name f =
   Printf.printf "  %s: %.1f ms\n%!" name (elapsed *. 1000.0);
   elapsed
 
+(* Measure just stat() overhead *)
+let stat_all_files () =
+  Array.iter (fun path -> ignore (Unix.stat path)) files
+
 let () =
   Printf.printf "=== Realistic Marshal_cache Benchmark ===\n\n%!";
   Random.self_init ();
@@ -88,8 +92,12 @@ let () =
   Printf.printf "\nBenchmark 2: Load all %d files (warm cache)\n%!" n_files;
   let t_cache_warm = time_it "Marshal_cache (warm)" load_all_cached in
 
+  (* Measure stat() overhead *)
+  let t_stat = time_it "stat() only (1000 files)" stat_all_files in
+
   Printf.printf "\n  Cold speedup: %.2fx\n%!" (t_channel_cold /. t_cache_cold);
   Printf.printf "  Warm speedup: %.2fx\n%!" (t_channel_cold /. t_cache_warm);
+  Printf.printf "  stat() overhead: %.1f%% of warm cache time\n%!" (t_stat /. t_cache_warm *. 100.0);
 
   (* Benchmark 3: Incremental updates *)
   Printf.printf "\nBenchmark 3: %d iterations, %d file changes per iteration\n%!"
