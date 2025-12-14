@@ -1,15 +1,21 @@
 (test
+ (name test_reactive_file_collection)
+ (libraries reactive_file_collection unix)
+ (flags (:standard -alert -unsafe)))
+
+
+(test
  (name test_marshal_cache)
- (libraries marshal_cache unix)
+ (libraries reactive_file_collection unix)
  (flags (:standard -alert -unsafe)))
 
 (executable
  (name bench_marshal_cache)
- (libraries marshal_cache unix)
+ (libraries reactive_file_collection unix)
  (flags (:standard -alert -unsafe)))
 
 (executable
  (name bench_realistic)
- (libraries marshal_cache unix)
+ (libraries reactive_file_collection unix)
  (flags (:standard -alert -unsafe)))
 

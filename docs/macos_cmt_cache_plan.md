@@ -2,7 +2,7 @@
 
 ## Overview
 
-A memory-mapped cache for marshalled OCaml files with automatic invalidation.
+A memory-mapped cache for marshalled OCaml files with automatic invalidation, plus a reactive collection abstraction for incremental systems.
 
 **Target**: OCaml 5.0+, macOS and Linux, stock toolchains.
 
@@ -12,26 +12,49 @@ A memory-mapped cache for marshalled OCaml files with automatic invalidation.
 - Keep contents **off-heap** via `mmap` (not scanned by GC)
 - Automatically refresh when files change on disk
 - Process once per access via callback API (values not retained)
+- Support reactive/incremental systems with delta-based updates
 
 ## API
+
+### Marshal_cache
 
 ```ocaml
 module Marshal_cache : sig
   exception Cache_error of string * string
-  (** (path, error_message) *)
 
   type stats = { entry_count : int; mapped_bytes : int }
 
   val with_unmarshalled_file : string -> ('a -> 'r) -> 'r
-  (** [with_unmarshalled_file path f] calls [f] with the unmarshalled value.
-      @raise Cache_error on file/mapping/unmarshal errors.
-      @alert unsafe Caller must ensure the file contains data of type ['a]. *)
+  (** Always unmarshals and calls callback. *)
+
+  val with_unmarshalled_if_changed : string -> ('a -> 'r) -> 'r option
+  (** Returns Some(result) if file changed, None if unchanged.
+      Key primitive for reactive systems - avoids unmarshal if unchanged. *)
 
   val clear : unit -> unit
   val invalidate : string -> unit
   val set_max_entries : int -> unit  (** Default: 10000 *)
   val set_max_bytes : int -> unit    (** Default: 1GB *)
   val stats : unit -> stats
+end
+```
+
+### Reactive_file_collection
+
+```ocaml
+module Reactive_file_collection : sig
+  type 'v t
+  type event = Added of string | Removed of string | Modified of string
+
+  val create : process:('a -> 'v) -> 'v t
+  val add : 'v t -> string -> unit
+  val remove : 'v t -> string -> unit
+  val update : 'v t -> string -> unit
+  val apply : 'v t -> event list -> unit
+
+  val get : 'v t -> string -> 'v option
+  val iter : (string -> 'v -> unit) -> 'v t -> unit
+  val fold : (string -> 'v -> 'acc -> 'acc) -> 'v t -> 'acc -> 'acc
 end
 ```
 
@@ -50,61 +73,39 @@ struct FileId {
 };
 ```
 
-Platform-specific mtime access:
-```cpp
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-  #define MTIME_SEC(st)  ((st).st_mtimespec.tv_sec)
-  #define MTIME_NSEC(st) ((st).st_mtimespec.tv_nsec)
-#else
-  #define MTIME_SEC(st)  ((st).st_mtim.tv_sec)
-  #define MTIME_NSEC(st) ((st).st_mtim.tv_nsec)
-#endif
-```
-
 ### Cache Structure
 
 ```cpp
-struct Entry {
-  std::string path;
-  Mapping current;
-  size_t in_use;                      // Active callback count
-  std::vector<Mapping> old_mappings;  // Deferred unmaps
-  std::list<std::string>::iterator lru_iter;
-};
-
 class MarshalCache {
   std::unordered_map<std::string, Entry> cache_;
   std::list<std::string> lru_order_;
   std::mutex mutex_;
   size_t max_entries_ = 10000;
   size_t max_bytes_ = 1ULL << 30;
-  size_t current_bytes_ = 0;
 };
 ```
 
 ### Access Pattern
 
-1. `acquire_mapping(path)`: Lock mutex, stat file, refresh if needed, increment `in_use`, **release mutex**
+1. `acquire_mapping(path)`: Lock, stat, refresh if needed, return `changed` flag
 2. Unmarshal via `caml_input_value_from_block` (zero-copy)
-3. Call OCaml callback (mutex not held)
-4. `release_mapping(path)`: Lock mutex, decrement `in_use`, cleanup `old_mappings` if `in_use == 0`
+3. Call callback (mutex released)
+4. `release_mapping(path)`: Cleanup
 
-### Unmarshalling
+### Eviction
 
-Zero-copy using OCaml 5+ API:
-```cpp
-result = caml_input_value_from_block(ptr, len);
-```
+Only evict when adding NEW entries, not when updating existing ones. This prevents iterator invalidation bugs when cache is at capacity.
 
-Validates marshal magic (0x8495A6BE or 0x8495A6BF) before unmarshalling.
+## Benchmark Results
 
-### Empty Files
+10,000 files × 20KB (195MB), 10 files changing per iteration:
 
-Empty files use sentinel pointer `(void*)1` and raise `Failure("marshal_cache: empty file")`.
-
-### Error Handling
-
-C++ exceptions convert to `Failure("path: message")`, then OCaml wrapper converts to `Cache_error(path, message)`.
+| Approach | Time | Speedup |
+|----------|------|---------|
+| `Marshal.from_channel` | 692 ms | 1x |
+| `with_unmarshalled_file` | 512 ms | 1.4x |
+| `with_unmarshalled_if_changed` | 22 ms | 32x |
+| Known-changed only | 0.73 ms | **948x** |
 
 ## Platform Support
 
@@ -115,26 +116,8 @@ C++ exceptions convert to `Failure("path: message")`, then OCaml wrapper convert
 | FreeBSD/OpenBSD | ⚠️ Should work |
 | Windows | ❌ Not supported |
 
-## Known Limitations
-
-1. **TOCTOU window**: File can change between `stat()` and `mmap()`. Benign (causes extra refresh, not stale data).
-2. **Large files**: Files exceeding virtual address space will fail.
-3. **Filesystem mtime precision**: Some filesystems only have second precision; inode check mitigates.
-
 ## Testing
 
-16 tests covering:
-- Basic/cached reads
-- File modification detection
-- Nested calls
-- Exception propagation
-- LRU eviction
-- Empty/missing files
-- Stats and clear/invalidate
-- Invalid arguments
-
-## Future Work
-
-- Concurrent domain stress tests
-- Performance benchmarks vs `Marshal.from_channel`
-- Optional debug/tracing mode
+32 tests total:
+- Marshal_cache: 22 tests (basic ops, modification detection, LRU, concurrent domains, fd leaks)
+- Reactive_file_collection: 10 tests (CRUD, batch events, iteration, error handling)
