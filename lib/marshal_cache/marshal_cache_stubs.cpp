@@ -312,8 +312,11 @@ void MarshalCache::acquire_mapping(const std::string& path,
   }
 
   if (needs_remap) {
-    // Evict if needed before adding new mapping
-    evict_if_needed();
+    // Only evict if we're adding a NEW entry (not updating existing)
+    // This prevents evicting the entry we're about to update
+    if (it == cache_.end()) {
+      evict_if_needed();
+    }
 
     // Create new mapping (may throw)
     Mapping new_mapping = create_mapping(path.c_str(), current_id);
